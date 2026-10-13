@@ -165,6 +165,102 @@ To stop the services, press `Ctrl+C` in the terminal running `run_all.py`.
 
 ---
 
+## Deploy to Vercel
+
+The repository is set up to deploy as **one Vercel Function**. Locally the project runs as three
+services on three ports; on Vercel, `server.py` mounts all of them into a single FastAPI app and the
+dashboard calls diagnosis and replay **in-process** instead of over HTTP.
+
+| Path on the deployment | What it is |
+|---|---|
+| `/` | Dashboard (Activity, Results, Custom) |
+| `/api/...` | Dashboard JSON API |
+| `/replay-api/docs` | Part 1 replay API (`POST /replay-api/replay`, `/branch`, `/runs`, …) |
+| `/diagnose-api/docs` | Part 2 diagnosis API (`POST /diagnose-api/diagnose`, `/explain`) |
+| `/healthz` | Health check (shows how many runs were loaded) |
+
+### Files that make it work
+
+| File | Purpose |
+|---|---|
+| `server.py` | Vercel entrypoint (auto-detected). Sets up paths and `/tmp` storage, seeds the run database, mounts the three apps. |
+| `vercel.json` | Function settings (`maxDuration: 300` seconds for long LLM runs). |
+| `.vercelignore` | Keeps local databases, replays, caches, secrets and other non-runtime files out of the upload. |
+| `requirements.txt` | **Runtime-only** dependencies that Vercel installs. Everything for local development is in `requirements-dev.txt`. |
+| `part2/lgb_lite.py` | Pure-Python reader for the trained `part2/model.txt`. Vercel's runtime has no `libgomp`, which the LightGBM wheel needs, so the deployed app scores with this reader instead (identical scores and evidence; LightGBM is still used locally and for training). |
+| `.env.example` | The environment variables you can set. |
+
+### Steps
+
+1. **Commit the recorded runs.** The deployment loads its data from `blackbox_part 1/runs/*.json`
+   (the SQLite database is not deployed). Make sure every run you want to show is committed:
+
+   ```powershell
+   git add -A          # .gitignore keeps .env, the database and replays out
+   git status          # check: blackbox_part 1/runs/*.json, server.py, vercel.json are staged
+   git commit -m "Deploy to Vercel"
+   git push
+   ```
+
+2. **Import the repository** at [vercel.com/new](https://vercel.com/new). Keep the defaults:
+   Framework Preset **FastAPI** (or Other), Root Directory = repository root, no build command.
+   Or from a terminal with the [Vercel CLI](https://vercel.com/docs/cli): `npm i -g vercel`, then `vercel` (preview) and `vercel --prod`.
+
+3. **Environment variables are optional.** Visitors can bring their own API keys (next section), so
+   you do not have to put any key on Vercel. If you do set `GEMINI_API_KEY`, `GROQ_API_KEY`, etc. in
+   *Project → Settings → Environment Variables*, they are used for every visitor who has not entered
+   their own key, and those calls are billed to you. See `.env.example`. Redeploy after changing variables.
+
+4. Open the deployment URL, then `/healthz` to check that the runs were loaded.
+
+### Visitors' own API keys (bring your own key)
+
+The dashboard has an **API keys** page in the sidebar. A visitor pastes a key for Google Gemini, Groq,
+OpenAI, OpenRouter or any OpenAI-compatible API (with its https base URL), clicks **Save & test**, and
+picks a default model from the list the provider returns. From then on that visitor can use those
+models everywhere: *Record a run*, the *Custom* page, *Branch from here* and *Explain this failure*
+(every model box suggests their models; any `provider:<model>` id can be typed).
+
+How the keys are handled:
+
+- Stored **only in the visitor's browser** (`localStorage`, or only for the tab when they untick
+  *Remember*). Other visitors never see them.
+- Sent with that visitor's own requests in the `X-Blackbox-Keys` header and used by the server for
+  that request only (a per-request context variable in `blackbox_part 1/apikeys.py`). They are not
+  written to the database, run files or logs; recorded runs keep only the model name.
+- A visitor's key takes priority over a server key for the same provider.
+- Because the server makes the LLM calls, visitors are trusting your deployment with their key, as with
+  any app of this kind. Serve it over HTTPS only (Vercel does this by default).
+
+API clients can use the same header, e.g.
+`curl -H 'X-Blackbox-Keys: {"groq":"gsk_..."}' https://<your-app>.vercel.app/api/custom/meta`.
+
+### Run the deployment build locally
+
+```powershell
+pip install -r requirements.txt uvicorn
+uvicorn server:app --port 3000
+```
+
+Open `http://localhost:3000`. This is the same single-process app Vercel runs (it uses your normal
+`blackbox_part 1/data/blackbox.db`). `python run_all.py` still works exactly as before.
+
+### Limits of the Vercel deployment
+
+- **Storage is temporary.** Vercel's filesystem is read-only except `/tmp`, so each server instance
+  builds its run database in `/tmp` from the committed runs (about 1–2 seconds on a cold start).
+  New runs, replays and confirmed causes recorded on the live site are kept only while that instance
+  is alive and are not shared between instances. For permanent storage, point the store at a hosted
+  database (for example Turso/libSQL or Postgres).
+- **No Ollama.** Local models (`llama3`, `mistral`) cannot run on Vercel. Use the mock models or a
+  hosted provider (`gemini:`, `groq:`, `openai:`, `openrouter:`) with a key from the API keys page.
+- **Time limit.** One request can run for up to 300 seconds (`vercel.json`). Very long custom runs
+  with slow models may hit it.
+- **Training stays local.** `python -m part2.train` needs LightGBM; commit the new `part2/model.txt`
+  and redeploy to ship a retrained model.
+
+---
+
 ## First run: explore the dashboard
 
 1. Open **Activity** to browse recorded runs.
@@ -411,11 +507,18 @@ The mock-model path is designed for offline development and does not require pro
 ```text
 .
 ├── README.md
+├── server.py                   # Vercel entrypoint: all services as one FastAPI app
+├── vercel.json                 # Vercel function settings
+├── .vercelignore               # Files kept out of the Vercel upload
+├── requirements.txt            # Runtime dependencies (what Vercel installs)
+├── requirements-dev.txt        # + LightGBM, uvicorn, pytest, Streamlit for local work
+├── .env.example                # Optional environment variables
 ├── run_all.py                  # Starts the complete local demo
 ├── contract/                   # Shared run/API contract
 ├── part2/
 │   ├── diagnose_api.py         # Diagnosis and explanation API
 │   ├── model.py                # LightGBM model and ranking logic
+│   ├── lgb_lite.py             # Pure-Python model reader (used on Vercel)
 │   ├── signals.py              # Step-level features and evidence
 │   ├── train.py                # Training pipeline
 │   ├── eval.py                 # Evaluation and report generation
