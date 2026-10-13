@@ -1,8 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "server.py": {
-      "maxDuration": 300
+  "services": {
+    "app": {
+      "root": ".",
+      "framework": "fastapi",
+      "functions": {
+        "server.py": { "maxDuration": 300 }
+      }
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": { "service": "app" } }
+  ]
 }
