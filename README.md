@@ -12,6 +12,8 @@
 
 *A full-stack observability and diagnosis platform for multi-step AI-agent workflows.*
 
+Check out the live project here: [Flight Recoder](https://black-box-flight-recorder-for-ai-ag.vercel.app/)
+
 </div>
 
 ---
