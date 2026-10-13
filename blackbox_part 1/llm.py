@@ -16,6 +16,7 @@ import os
 import re
 from dataclasses import dataclass
 
+import apikeys
 import tasks
 
 
@@ -86,14 +87,14 @@ class OpenAICompatLLM:
         provider, _, model = name.partition(":")
         base, key_env = PROVIDERS[provider]
         self.name, self.model, self.key_env = name, model, key_env
-        self.base = (os.environ.get("BLACKBOX_LLM_BASE_URL") if provider == "api" else base) or ""
+        self.base = (apikeys.get("BLACKBOX_LLM_BASE_URL") if provider == "api" else base) or ""
         self.timeout, self.retries = timeout, retries
 
     def complete(self, prompt: str, json_mode: bool = False) -> LLMResult:
         import time
 
         import requests
-        key = os.environ.get(self.key_env, "")
+        key = apikeys.get(self.key_env)   # the visitor's own key (dashboard "API keys"), else the env var
         if not self.base:
             return LLMResult("", 0, "llm_error: BLACKBOX_LLM_BASE_URL not set")
         if not key and "localhost" not in self.base and "127.0.0.1" not in self.base:

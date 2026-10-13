@@ -8,6 +8,7 @@ clients (diagnose / explain / replay) the Streamlit UI (app.py) uses.
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import json
 import os
 import re
@@ -20,6 +21,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+import apikeys
 import clients
 import custom
 import inject
@@ -32,10 +34,13 @@ ROOT = Path(__file__).resolve().parent
 UI_DIR = ROOT / "ui"
 CONFIRMED_DIR = Path(os.environ.get("BLACKBOX_CONFIRMED_DIR", store.ROOT / "confirmed"))
 RESULTS_MD = Path(os.environ.get("BLACKBOX_RESULTS_MD", ROOT.parent / "part2" / "results.md"))
-MODELS = ["mock-large", "mock-small", "llama3", "mistral"]
+# models offered in the "record a run" picker; BLACKBOX_MODELS (comma-separated) overrides it
+MODELS = [m.strip() for m in os.environ.get("BLACKBOX_MODELS", "mock-large,mock-small,llama3,mistral").split(",")
+          if m.strip()]
 MOCK_TTL = 30  # seconds a built-in-mock diagnosis is kept before Part 2's API is tried again
 
 app = FastAPI(title="Black Box - dashboard (Part 1)", version="1.0")
+app.add_middleware(apikeys.KeysMiddleware)   # visitor's own API keys, scoped to each request
 _diag: dict[str, tuple[float, dict]] = {}
 _replay_cache: dict[str, Any] = {"n": -1, "rows": []}
 
@@ -46,6 +51,8 @@ def index():
 
 
 def _up(url: str) -> bool:
+    if clients.INPROCESS:      # Vercel: diagnose and replay run inside this process
+        return True
     try:
         return requests.get(f"{url}/health", timeout=0.6).ok
     except Exception:  # noqa: BLE001
@@ -57,10 +64,62 @@ def meta():
     return {
         "tasks": [{"task_id": t.task_id, "text": t.text, "demo": t.task_id in tasks.DEMO_TASK_IDS} for t in tasks.TASKS],
         "models": MODELS, "frameworks": ["custom", "langgraph"], "fault_types": inject.FAULT_TYPES,
-        "diagnose_url": clients.DIAGNOSE_URL, "replay_url": clients.REPLAY_URL,
+        "diagnose_url": "in-process" if clients.INPROCESS else clients.DIAGNOSE_URL,
+        "replay_url": "in-process" if clients.INPROCESS else clients.REPLAY_URL,
         "services": {"diagnose": _up(clients.DIAGNOSE_URL), "replay": _up(clients.REPLAY_URL)},
         "explain_llm": os.environ.get("BLACKBOX_EXPLAIN_LLM", ""),
+        "key_providers": [{"prefix": p, "key_env": e, "server_key": bool(os.environ.get(e)),
+                           "user_key": apikeys.has_user_key(p)} for p, e in apikeys.KEY_ENV.items()],
     }
+
+
+# ------------------------------------------------------------------ bring your own key
+_NOT_CHAT = re.compile(r"embed|imagen|veo|tts|whisper|dall-e|moderation|transcri|audio|realtime|image|aqa|"
+                       r"computer-use|search-preview|babbage|davinci", re.I)
+
+
+class KeyCheckReq(BaseModel):
+    provider: str
+    key: str
+    base_url: Optional[str] = None
+
+
+@app.post("/api/keys/check")
+def check_key(req: KeyCheckReq):
+    """Test a visitor's key against the provider and list the chat models it can use.
+    The key is used for this one call and not stored."""
+    import llm as llm_mod
+    if req.provider not in llm_mod.PROVIDERS:
+        raise HTTPException(422, f"unknown provider `{req.provider}`")
+    try:
+        key = apikeys._clean_key(req.key)
+        base = llm_mod.PROVIDERS[req.provider][0] or apikeys.check_base_url(req.base_url or "")
+    except apikeys.KeysError as e:
+        raise HTTPException(422, str(e))
+    if not key:
+        raise HTTPException(422, "Paste a key first.")
+    auth = {"Authorization": f"Bearer {key}"}
+    try:
+        if req.provider == "openrouter":     # its model list is public, so check the key separately
+            k = requests.get("https://openrouter.ai/api/v1/key", headers=auth, timeout=10)
+            if k.status_code >= 400:
+                return {"ok": False, "error": f"The provider rejected this key (HTTP {k.status_code}).", "models": []}
+        r = requests.get(f"{base.rstrip('/')}/models", headers=auth, timeout=15)
+    except requests.RequestException as e:
+        return {"ok": False, "error": f"Could not reach the provider ({type(e).__name__}).", "models": []}
+    if r.status_code in (401, 403):
+        return {"ok": False, "error": f"The provider rejected this key (HTTP {r.status_code}).", "models": []}
+    if r.status_code >= 400:
+        return {"ok": False, "error": f"The provider answered HTTP {r.status_code}.", "models": []}
+    try:
+        data = r.json()
+        items = data.get("data") or data.get("models") or []
+        ids = {str(m.get("id") or m.get("name") or "").removeprefix("models/") for m in items if isinstance(m, dict)}
+    except Exception:  # noqa: BLE001
+        return {"ok": True, "error": "Key accepted, but the model list could not be read. Type a model id yourself.",
+                "models": []}
+    models = sorted(m for m in ids if m and not _NOT_CHAT.search(m))
+    return {"ok": True, "models": models[:500], "error": None}
 
 
 def _confirmed_ids() -> set[str]:
@@ -298,12 +357,14 @@ def _custom_summary(run: dict, reference: Optional[dict] = None) -> dict:
                      "see \"How lookups work\".")
     if live:
         src = {v.get("source") for v in (c.get("lookups") or {}).values()}
-        parts = ([] if "wikidata" not in src else ["Wikidata (latest dated value on record)"]) + \
+        parts = ([] if not src & {"wikidata", "worldbank"} else [
+                     " and ".join(n for k, n in (("worldbank", "the World Bank"), ("wikidata", "Wikidata")) if k in src)
+                     + " (latest dated value on record)"]) + \
                 ([] if "wikipedia+model" not in src else ["the model reading a Wikipedia extract"]) + \
                 ([] if "model" not in src else ["the model's own knowledge, which can be out of date"])
         if parts:
             notes.append("Lookups in this run came from " + ", ".join(parts) + ". "
-                         + ("" if src == {"wikidata"} else "Model answers are not verified facts."))
+                         + ("" if src <= {"wikidata", "worldbank"} else "Model answers are not verified facts."))
     if c.get("judged_by") == "completed":
         notes.append("No expected answer was available, so the outcome only says whether the run finished with a "
                      "number and no step error. It does not say the answer is correct.")
@@ -338,7 +399,8 @@ def custom_run(req: CustomRunReq):
         custom.check_model(req.model, (req.query or "").strip())
     except custom.CustomError as e:
         raise HTTPException(422, str(e))
-    job = _pool.submit(custom.record_custom, req.query, req.model.strip(), req.framework, fault, req.expected)
+    # copy_context: the worker thread must see this request's API keys
+    job = _pool.submit(contextvars.copy_context().run, custom.record_custom, req.query, req.model.strip(), req.framework, fault, req.expected)
     try:
         res = job.result(timeout=CUSTOM_TIMEOUT)
     except concurrent.futures.TimeoutError:

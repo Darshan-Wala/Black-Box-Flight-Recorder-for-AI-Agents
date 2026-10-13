@@ -5,6 +5,7 @@ POST /explain: the same suspects plus a plain-language explanation of the failur
 """
 from fastapi import Body, FastAPI, HTTPException
 
+from . import baseline
 from . import explain as explainer
 from . import model
 
@@ -34,12 +35,20 @@ def diagnose(payload: dict = Body(...)):
 
 @app.post("/explain")
 def explain(payload: dict = Body(...)):
-    """Body: the run, or {"run": {...}, "llm": "groq:<model>"}. Without `llm` (and without the
-    BLACKBOX_EXPLAIN_LLM environment variable) the explanation is built from the model's evidence."""
+    """Body: the run, or {"run": {...}, "llm": "groq:<model>", "api_keys": {"GROQ_API_KEY": "..."}}.
+    Without `llm` (and without the BLACKBOX_EXPLAIN_LLM environment variable) the explanation is built
+    from the model's evidence. `api_keys` (optional) are used for this request only, never stored."""
     run = payload.get("run", payload)
     if not run.get("steps"):
         raise HTTPException(400, "run has no steps")
     suspects = model.diagnose(booster(), run)
     llm = payload.get("llm") if "run" in payload else None
-    return {"run_id": run.get("run_id"), "suspects": suspects,
-            "explanation": explainer.explain(run, suspects, llm)}
+    keys = payload.get("api_keys") if "run" in payload else None
+    keys = {str(k): str(v) for k, v in keys.items() if k.endswith(("_API_KEY", "_BASE_URL")) and v} \
+        if isinstance(keys, dict) else {}
+    token = baseline.API_KEYS.set(keys)
+    try:
+        text = explainer.explain(run, suspects, llm)
+    finally:
+        baseline.API_KEYS.reset(token)
+    return {"run_id": run.get("run_id"), "suspects": suspects, "explanation": text}

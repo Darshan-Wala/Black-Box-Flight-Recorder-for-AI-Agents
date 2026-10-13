@@ -1,8 +1,12 @@
 """Train the diagnosis model and rank suspect steps."""
 import os
 
-import lightgbm as lgb
 import numpy as np
+
+try:  # the real package is needed to train; inference falls back to a pure-Python reader
+    import lightgbm as lgb
+except (ImportError, OSError):  # OSError: libgomp.so.1 missing (e.g. on Vercel)
+    lgb = None
 
 from .signals import EVIDENCE, FEATURES, decisive, extract
 
@@ -36,6 +40,8 @@ def train(runs, rounds=300, features=FEATURES, real_weight=1.0):
             y.append(int(step["step_no"] == run["faulty_step"]))
             w.append(weight)
     X, y = np.array(X, dtype=float), np.array(y)
+    if lgb is None:
+        raise RuntimeError("training needs the lightgbm package: pip install lightgbm")
     params = dict(objective="binary", learning_rate=0.05, num_leaves=15, min_data_in_leaf=10,
                   feature_fraction=0.9, bagging_fraction=0.9, bagging_freq=1,
                   scale_pos_weight=(len(y) - y.sum()) / max(1, y.sum()), seed=7, verbose=-1)
@@ -47,7 +53,12 @@ def save(booster, path=MODEL_PATH):
 
 
 def load(path=MODEL_PATH):
-    return lgb.Booster(model_file=path)
+    """lightgbm.Booster when the package is importable, else the pure-Python reader
+    (same scores and contributions; used on Vercel). BLACKBOX_LGB_LITE=1 forces the reader."""
+    if lgb is not None and os.environ.get("BLACKBOX_LGB_LITE", "") not in ("1", "true"):
+        return lgb.Booster(model_file=path)
+    from .lgb_lite import Booster
+    return Booster(path)
 
 
 def scores(booster, run, rows=None):
@@ -81,9 +92,11 @@ def diagnose(booster, run, k=3, rerank=True):
         return []
     feats = features_of(booster)
     X = _matrix(rows, feats)
-    contrib = booster.predict(X, pred_contrib=True)
-    score = np.minimum(np.array(final_scores(booster, run, rerank, rows)), 1.0)
-    order = np.argsort(-np.array(final_scores(booster, run, rerank, rows)), kind="stable")
+    final = np.array(final_scores(booster, run, rerank, rows))
+    score = np.minimum(final, 1.0)
+    order = np.argsort(-final, kind="stable")
+    top = list(order[:k])
+    contrib = dict(zip(top, booster.predict(X[top], pred_contrib=True)))  # only the rows shown
     share = score / score.sum() if score.sum() > 0 else np.full(len(score), 1 / len(score))
     suspects = []
     for i in order[:k]:

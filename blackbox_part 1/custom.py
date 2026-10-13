@@ -20,7 +20,9 @@ Search in a custom run (saved as `custom.search`, and reused by replays):
               (and always for the mock models): the normal local search tool.
   live        any other query on a real model. Each search tries, in order:
                 1. Wikidata, for population, area, elevation/height, length and GDP: the most
-                   recently dated value on record, read by code (no model involved);
+                   recently dated value on record, read by code (no model involved). For a
+                   country's population or GDP the World Bank's latest figure is used instead
+                   when it is newer;
                 2. the run's own model, with a Wikipedia extract as reference;
                 3. the run's own model alone, when the web is not reachable.
               BLACKBOX_WEB_SEARCH=0 turns 1 and 2 off. Numbers are written in full digits, or
@@ -35,6 +37,7 @@ import os
 import re
 import time
 
+import apikeys
 import inject
 import llm as llm_mod
 import store
@@ -163,10 +166,46 @@ def _latest(claims: list, factors: dict) -> tuple[float, str | None] | None:
     return (best[1], best[2]) if best else None
 
 
+WORLDBANK_URL = "https://api.worldbank.org/v2"
+_WB = {"population": "SP.POP.TOTL", "GDP": "NY.GDP.MKTP.CD", "GDP per capita": "NY.GDP.PCAP.CD"}
+_wb_cache: dict = {}
+_wb_down_until = 0.0
+
+
+def worldbank(iso3: str, noun: str, timeout: float = 4.0) -> tuple[float, str] | None:
+    """(value, year) of the World Bank's most recent figure for a country, or None. Never raises."""
+    global _wb_down_until
+    ind = _WB.get(noun)
+    if not ind or not iso3 or not web_enabled():
+        return None
+    if (iso3, ind) in _wb_cache:
+        return _wb_cache[(iso3, ind)]
+    if time.time() < _wb_down_until:
+        return None
+    import requests
+    try:
+        r = requests.get(f"{os.environ.get('BLACKBOX_WORLDBANK_URL', WORLDBANK_URL)}/country/{iso3}/indicator/{ind}",
+                         timeout=timeout, headers=_UA, params={"format": "json", "mrnev": 1})
+        r.raise_for_status()
+        data = r.json()
+    except Exception:  # noqa: BLE001  offline or blocked: keep the Wikidata figure
+        _wb_down_until = time.time() + 60
+        return None
+    try:
+        row = data[1][0]
+        got = (float(row["value"]), str(row["date"])[:4])
+        if not got[1].isdigit():
+            got = None
+    except (IndexError, KeyError, TypeError, ValueError):   # no figure for this country
+        got = None
+    _wb_cache[(iso3, ind)] = got
+    return got
+
+
 def wikidata(query: str, timeout: float = 4.0) -> dict | None:
     """Current value for a lookup such as "population of India", from Wikidata, or None.
 
-    Returns {"label", "noun", "value", "unit", "year", "id"}. Never raises."""
+    Returns {"label", "noun", "value", "unit", "year", "id", "iso3"}. Never raises."""
     global _wikidata_down_until
     attr = next((a for a in _ATTRS if re.search(a[0], query, re.I)), None)
     words = [w for w in re.findall(r"[^\W_]+(?:[-'.][^\W_]+)*", query) if w.lower() not in _FILLER and not w.isdigit()]
@@ -195,14 +234,22 @@ def wikidata(query: str, timeout: float = 4.0) -> dict | None:
                     got = _latest((e.get("claims") or {}).get(p), factors)
                     if got:
                         label = ((e.get("labels") or {}).get("en") or {}).get("value") or name
-                        return {"label": label, "noun": noun, "value": got[0], "unit": unit, "year": got[1], "id": i}
+                        try:
+                            iso3 = e["claims"]["P298"][0]["mainsnak"]["datavalue"]["value"]
+                        except (KeyError, IndexError, TypeError):
+                            iso3 = None
+                        return {"label": label, "noun": noun, "value": got[0], "unit": unit, "year": got[1], "id": i,
+                                "iso3": iso3 if isinstance(iso3, str) else None}
     except Exception:  # noqa: BLE001  offline, blocked or a bad reply: fall back to Wikipedia / the model
         _wikidata_down_until = time.time() + 60
     return None
 
 
 def _num(v: float) -> str:
-    return tasks.fmt_value(round(v, 3 if abs(v) < 1e6 else 0))
+    """A number a small model reads back unchanged. Never three digits after the point: llama3 read
+    "1326.093 million" as 1326093 (it took the point for a thousands separator)."""
+    a = abs(v)
+    return tasks.fmt_value(round(v, 0 if a >= 1e6 or a >= 1000 and v == int(v) else 1 if a >= 10 else 2))
 
 
 def rescale(text: str, scale: float, word: str) -> str:
@@ -232,7 +279,11 @@ def live_search(query: str, ctx: dict) -> str:
     scale, word = ctx["scale"]
     fact = wikidata(query)
     if fact:                                 # a dated value read by code; the model is not involved
-        ctx["lookups"][query] = {"source": "wikidata", "title": f"{fact['label']} ({fact['id']})", "as_of": fact["year"]}
+        src, wb = "wikidata", worldbank(fact["iso3"], fact["noun"])
+        if wb and wb[1] > (fact["year"] or "0000"):          # a country: take whichever figure is newer
+            src, fact = "worldbank", {**fact, "value": wb[0], "year": wb[1]}
+        ctx["lookups"][query] = {"source": src, "title": f"{fact['label']} ({fact['iso3'] if src == 'worldbank' else fact['id']})",
+                                 "as_of": fact["year"]}
         return (f"{fact['label']} has a {fact['noun']} of {_num(fact['value'] / scale)} "
                 f"{word + ' ' if word else ''}{fact['unit']}.")
     ref = wikipedia(query)
@@ -331,8 +382,9 @@ def supported_models() -> dict:
         out.append({"id": m, "group": "Ollama (local)", "available": True, "note": "Local model."})
     providers = []
     for prefix, (base, key_env) in llm_mod.PROVIDERS.items():
-        ready = bool(os.environ.get(key_env)) and bool(base or os.environ.get("BLACKBOX_LLM_BASE_URL"))
-        providers.append({"prefix": prefix, "key_env": key_env, "available": ready})
+        ready = bool(apikeys.get(key_env)) and bool(base or apikeys.get("BLACKBOX_LLM_BASE_URL"))
+        providers.append({"prefix": prefix, "key_env": key_env, "available": ready,
+                          "user_key": apikeys.has_user_key(prefix)})
     ready = {p["prefix"] for p in providers if p["available"]}
     with store._conn() as c:   # hosted models that already produced a successful run here
         used = [r[0] for r in c.execute("SELECT DISTINCT model FROM runs WHERE outcome='success' AND model LIKE '%:%'")]
@@ -363,10 +415,12 @@ def check_model(model: str, query: str) -> None:
         base, key_env = llm_mod.PROVIDERS[prefix]
         if not name:
             raise CustomError(f"Add the model name after `{prefix}:`.")
-        if not os.environ.get(key_env):
-            raise CustomError(f"{key_env} is not set. Set it before starting the dashboard to use `{prefix}:` models.")
-        if not base and not os.environ.get("BLACKBOX_LLM_BASE_URL"):
-            raise CustomError("BLACKBOX_LLM_BASE_URL is not set, so `api:` models have nowhere to go.")
+        if not apikeys.get(key_env):
+            raise CustomError(f"No API key for `{prefix}:` models. Add yours under \"API keys\" in the sidebar "
+                              f"(or set {key_env} on the server).")
+        if not base and not apikeys.get("BLACKBOX_LLM_BASE_URL"):
+            raise CustomError("`api:` models need a base URL. Add it with your key under \"API keys\" "
+                              "(or set BLACKBOX_LLM_BASE_URL on the server).")
         return
     installed = ollama_models()
     if installed is None:

@@ -490,6 +490,7 @@ def test_custom_wikidata_lookup_is_current_and_unit_aware(monkeypatch):
             c["qualifiers"] = {"P585": [{"datavalue": {"value": {"time": f"+{year}-00-00T00:00:00Z"}}}]}
         return c
     ENT = {"Q142": {"labels": {"en": {"value": "France"}}, "claims": {
+               "P298": [{"mainsnak": {"datavalue": {"value": "FRA"}}}],
                "P1082": [claim("+66000000", year=2015, rank="preferred"), claim("+68600000", year=2025),
                          claim("+99", year=2030, rank="deprecated")],
                "P2046": [claim("+643801", Q + "Q712226")]}},
@@ -505,19 +506,26 @@ def test_custom_wikidata_lookup_is_current_and_unit_aware(monkeypatch):
 
     def fake_get(url, params=None, **kw):
         seen.append(params)
+        if "/country/FRA/indicator/SP.POP.TOTL" in url:           # World Bank has a newer figure for France only
+            return R([{"page": 1}, [{"countryiso3code": "FRA", "date": wb_year[0], "value": 68912345}]])
+        if "/indicator/" in url:
+            return R([{"message": "no data"}])
         if params["action"] == "wbsearchentities":
             hits = {"France": ["Q999", "Q142"], "Spain": ["Q29"], "Nile": ["Q3392"]}.get(params["search"], [])
             return R({"search": [{"id": i} for i in hits]})
         if params["action"] == "wbgetentities":
             return R({"entities": {i: ENT[i] for i in params["ids"].split("|")}})
         return R({"query": {"pages": {}}})                       # Wikipedia: nothing found
+    wb_year = ["2019"]
     monkeypatch.setenv("BLACKBOX_WEB_SEARCH", "1")
     monkeypatch.setattr(custom, "_web_down_until", 0.0)
     monkeypatch.setattr(custom, "_wikidata_down_until", 0.0)
     monkeypatch.setattr(requests, "get", fake_get)
     # the latest dated, non-deprecated value wins; the first search hit without the property is skipped
+    monkeypatch.setattr(custom, "_wb_down_until", 0.0)
+    monkeypatch.setattr(custom, "_wb_cache", {})
     assert custom.wikidata("population of France 2026") == {"label": "France", "noun": "population", "value": 68600000.0,
-                                                            "unit": "people", "year": "2025", "id": "Q142"}
+                                                            "unit": "people", "year": "2025", "id": "Q142", "iso3": "FRA"}
     assert custom.wikidata("land area of France")["value"] == 643801.0
     assert custom.wikidata("length of the Nile river")["value"] == 6650.0          # metres -> kilometres
     assert custom.wikidata("capital of France") is None and custom.wikidata("population of Atlantis") is None
@@ -525,6 +533,18 @@ def test_custom_wikidata_lookup_is_current_and_unit_aware(monkeypatch):
     assert run["steps"][1]["output"] == "France has a population of 68.6 million people." and not calls
     assert run["custom"]["lookups"]["population of France"] == {"source": "wikidata", "title": "France (Q142)", "as_of": "2025"}
     assert run["outcome"] == "success" and tasks.parse_answer(run["final_answer"]) == 117.7
+    # numbers are written so a small model cannot misread them: never three digits after the point
+    assert [custom._num(v) for v in (1326.093, 214.212, 37.563, 0.9264, 1326093247.0, 8849.0, 6650.4)] == [
+        "1326.1", "214.2", "37.6", "0.93", "1326093247", "8849", "6650.4"]
+    # the World Bank figure replaces Wikidata's only when it is newer
+    assert custom.worldbank("FRA", "population") == (68912345.0, "2019") and custom.worldbank("ESP", "population") is None
+    wb_year[0] = "2026"
+    monkeypatch.setattr(custom, "_wb_cache", {})
+    monkeypatch.setattr(custom, "_wb_down_until", 0.0)
+    run = custom.record_custom(FREE, "groq:some-model")["run"]
+    assert run["steps"][1]["output"] == "France has a population of 68.9 million people."
+    assert run["custom"]["lookups"]["population of France"] == {"source": "worldbank", "title": "France (FRA)", "as_of": "2026"}
+    assert run["custom"]["lookups"]["population of Spain"]["source"] == "wikidata"
     assert custom.task_scale("total, in billions?") == (1e9, "billion") and custom.task_scale("in Spain") == (1.0, "")
     assert custom.rescale("Spain has 48,100,000 people.", 1e6, "million") == "Spain has 48.1 million people."
 

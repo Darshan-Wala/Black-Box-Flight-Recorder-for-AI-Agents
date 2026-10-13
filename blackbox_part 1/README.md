@@ -76,9 +76,10 @@ with diagnosis, replay and verify.
 * **Lookups** (saved in the run as `custom.search`, and reused by replays):
   * `live`: any free-form query on a real model. Each search tries, in order: (1) **Wikidata** for
     population, area, elevation/height, length and GDP, taking the most recently dated value on record
-    (read by code, no model involved, so it does not depend on what the model remembers); (2) the model
+    (read by code, no model involved, so it does not depend on what the model remembers; for a country's
+    population or GDP the World Bank's latest figure is used instead when it is newer); (2) the model
     you picked, with a Wikipedia extract as reference; (3) the model alone when the web is not reachable.
-    `custom.lookups` records the source of each one (`wikidata` with `as_of` year, `wikipedia+model` or
+    `custom.lookups` records the source of each one (`wikidata` or `worldbank` with `as_of` year, `wikipedia+model` or
     `model`) and the trace shows it. Numbers are in full digits, or in the unit the query asks for
     ("in millions"), so the lookups of one run can be combined. Model answers are not verified facts.
     `BLACKBOX_WEB_SEARCH=0` turns the web off. A fault run reuses the lookups of its reference run.
@@ -128,6 +129,7 @@ inline as `"run": {...}`.
 | `app.py` | Old Streamlit UI, still works via `python start.py --streamlit`: timeline, top-3 suspects, edit/rewind panel, side-by-side view, savings meter, "save confirmed cause" |
 | `inject.py` | Fault-injection flag `fault={"step_no": 4, "type": "empty_search"}` |
 | `custom.py` | Custom runs: model discovery, validation, live lookups, outcome judging, `record_custom` |
+| `apikeys.py` | Bring-your-own-key: reads a visitor's keys from the `X-Blackbox-Keys` header and scopes them to that request (dashboard page: **API keys**) |
 | `scripts/load_runs.py` | Rebuilds `data/blackbox.db` from `runs/*.json` on a fresh clone (the database is not in git) |
 | `tasks.py`, `tools.py` | 25 demo tasks over a local fact corpus, search and calculator tools. Demo tasks: `t01`, `t16`. |
 | `llm.py` | `MockLLM` (offline, deterministic) and `OllamaLLM` |

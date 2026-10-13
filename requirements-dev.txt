@@ -1,0 +1,7 @@
+# Everything for local development: pip install -r requirements-dev.txt
+-r requirements.txt
+lightgbm>=4.0           # training (python -m part2.train); inference falls back to part2/lgb_lite.py without it
+uvicorn>=0.29           # run_all.py / start.py and local `uvicorn server:app`
+httpx>=0.27             # FastAPI TestClient
+pytest>=8
+streamlit>=1.35         # only for the old UI: python start.py --streamlit

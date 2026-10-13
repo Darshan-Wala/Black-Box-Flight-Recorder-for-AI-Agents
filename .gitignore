@@ -15,3 +15,9 @@ part2/data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Vercel CLI link folder
+.vercel/
+
+# runs removed from the deploy seed (kept locally as a backup; safe to delete)
+_removed_runs/

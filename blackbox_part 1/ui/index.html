@@ -28,6 +28,8 @@ button{cursor:pointer}
 .nav{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;color:var(--text2);border:0;background:none;text-align:left;width:100%}
 .nav:hover{background:var(--panel);color:var(--text)}
 .nav.on{background:var(--panel2);color:var(--text);font-weight:600}
+a{color:#7fb2f0} a:hover{color:#a9cdfb}
+.kbadge{margin-left:auto;background:#1f7a52;color:#fff;border-radius:999px;font-size:11px;padding:0 7px;font-weight:600}
 .nav svg{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .rail .grow{flex:1}
 .primary{background:#1f7a52;border:1px solid #2a9a69;color:#fff;font-weight:650;border-radius:8px;padding:9px 12px}
@@ -154,6 +156,7 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
     <button class="nav" data-go="#/"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Activity</button>
     <button class="nav" data-go="#/results"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Results</button>
     <button class="nav" data-go="#/custom"><svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h3M11 12h9M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>Custom</button>
+    <button class="nav" data-go="#/keys"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/></svg>API keys<span class="kbadge" id="keyBadge" style="display:none"></span></button>
     <div class="grow"></div>
     <div class="svc" id="svc"></div>
     <button class="primary" id="recBtn">+ Record a run</button>
@@ -174,7 +177,10 @@ const pct = (a, b) => b ? Math.round(100 * a / b) + "%" : "–";
 const fmtTime = iso => iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
 const chip = (t, c = "") => `<span class="chip ${c}">${esc(t)}</span>`;
 async function api(path, body) {
-  const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined);
+  const headers = {}, kh = keysHeader();               // the visitor's own API keys (API keys page)
+  if (kh) headers["X-Blackbox-Keys"] = kh;
+  if (body) headers["Content-Type"] = "application/json";
+  const r = await fetch(path, body ? { method: "POST", headers, body: JSON.stringify(body) } : { headers });
   if (!r.ok) { let m = r.statusText; try { const j = await r.json(); m = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch (e) {} throw new Error(m); }
   return r.json();
 }
@@ -472,7 +478,7 @@ function renderSuspects() {
 function renderWhy() {
   const ex = D.explain, el = $("#d-why");
   el.innerHTML = `<h3>Why did it fail?</h3>
-    <div class="row"><input class="inp" id="exllm" style="flex:1;min-width:160px" placeholder="optional LLM: llama3, groq:<model> (empty = no LLM)" value="${esc(D.exllm ?? S.meta.explain_llm)}">
+    <div class="row"><input class="inp" id="exllm" list="dl-models" style="flex:1;min-width:160px" placeholder="optional LLM: llama3, groq:<model> (empty = no LLM)" value="${esc(D.exllm ?? S.meta.explain_llm)}">
       <button class="btn" id="exgo">${ex === "busy" ? '<span class="spin"></span>Writing…' : "Explain this failure"}</button></div>
     <div class="cap">The diagnosis model picks the suspect step. The LLM, if given, only words the explanation.</div>` +
     (ex && ex !== "busy" ? (ex.error ? `<div class="note warn">${esc(ex.error)}</div>` :
@@ -496,7 +502,7 @@ function renderEdit() {
     const opts = [run.model, ...S.meta.models.filter(m => m !== run.model)];
     body = `<div class="cap">Alternative execution: steps before ${D.sel} are restored from the record; step ${D.sel} and all ${run.steps.length - run.steps.findIndex(s => s.step_no === D.sel) - 1} step(s) after it run again, with the model you pick.</div>
       <div class="row"><select class="inp" id="altm">${opts.map(m => `<option ${m === (D.alt || run.model) ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>
-      <input class="inp" id="altc" style="flex:1;min-width:150px" placeholder="…or another model id, e.g. groq:<model>" value="${esc(D.altc || "")}"></div>`;
+      <input class="inp" id="altc" list="dl-models" style="flex:1;min-width:150px" placeholder="…or another model id, e.g. groq:<model>" value="${esc(D.altc || "")}"></div>`;
   }
   const stt = rw && rw.state;
   el.innerHTML = `<h3>Edit and replay</h3>
@@ -630,7 +636,9 @@ async function renderCustom() {
   const main = $("#main");
   main.innerHTML = `<div class="top"><h1>Custom</h1></div>
     <div class="page" id="cpage"><div class="empty"><span class="spin"></span>Loading…</div></div>`;
-  try { CU.meta = await api("/api/custom/meta"); } catch (e) { $("#cpage").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  try { CU.meta = await api("/api/custom/meta");
+    for (const id of userModels()) if (!CU.meta.models.some(x => x.id === id))
+      CU.meta.models.push({ id, group: "Your API keys", available: true, note: "Runs with your own key (API keys page)." }); } catch (e) { $("#cpage").innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   if (!CU.model || !CU.meta.models.some(m => m.id === CU.model)) CU.model = (CU.meta.models.find(m => m.group !== "Offline mock") || CU.meta.models[0] || {}).id || "";
   $("#cpage").innerHTML = `<div class="cap" style="margin:0 0 8px">Run your own query on a model you pick, optionally with a controlled fault, then diagnose, replay and verify it.</div>
     <div class="seg" id="c-steps" style="margin:0 0 14px"></div>
@@ -656,14 +664,14 @@ function cuConfig() {
       ${m.examples.slice(0, 3).map((x, i) => `<button class="btn sm" data-ex="${i}" title="${esc(x)}">example ${i + 1}</button>`).join("")}</div>
     <details style="margin:8px 0"><summary>How lookups work</summary>
       <div class="cap">The agent plans lookups, reads one number from each, combines them with a calculator and answers with a number. So ask for something that can be worked out from numbers.</div>
-      <div class="cap"><b style="color:var(--text2)">Any question, on a real model:</b> ${m.web_search ? "population, area, height, length and GDP lookups read the latest dated value from Wikidata. Anything else is answered in one sentence by the model you picked, using Wikipedia text as reference. If the web is not reachable the model answers from its own knowledge, which can be out of date." : "each lookup is answered by the model from its own knowledge, which can be out of date (web lookups are turned off)."} Ask for the answer “in millions” and every lookup is given in millions.</div>
+      <div class="cap"><b style="color:var(--text2)">Any question, on a real model:</b> ${m.web_search ? "population, area, height, length and GDP lookups read the latest dated value from Wikidata, or from the World Bank when its figure for a country is newer. Anything else is answered in one sentence by the model you picked, using Wikipedia text as reference. If the web is not reachable the model answers from its own knowledge, which can be out of date." : "each lookup is answered by the model from its own knowledge, which can be out of date (web lookups are turned off)."} Ask for the answer “in millions” and every lookup is given in millions.</div>
       <div class="cap"><b style="color:var(--text2)">Built-in question shapes</b> (the examples) about the names below use the local fact table instead, and are the only thing the mock models can run:</div>
       ${m.knowledge.map(k => `<div class="cap"><b style="color:var(--text2)">${esc(k.attribute)}</b> (${esc(k.unit)}): ${esc(k.entities.join(", "))}</div>`).join("")}</details>
     <label class="cap" for="cm" style="display:block;margin-top:12px">Model</label>
     <div class="row" style="margin:2px 0"><select class="inp" id="cm" style="flex:1;min-width:150px">${groups.map(g => `<optgroup label="${esc(g)}">${m.models.filter(x => x.group === g).map(x => `<option ${x.id === CU.model ? "selected" : ""}>${esc(x.id)}</option>`).join("")}</optgroup>`).join("")}</select>
-      ${typed ? `<input class="inp" id="cmi" style="flex:1.3;min-width:170px" value="${esc(CU.modelId)}" title="When filled in, this id is used instead of the list" placeholder="…or type an id: ${esc(ready.length ? ready[0].prefix + ":<model>" : "an installed Ollama model")}">` : ""}</div>
+      ${typed ? `<input class="inp" id="cmi" list="dl-models" style="flex:1.3;min-width:170px" value="${esc(CU.modelId)}" title="When filled in, this id is used instead of the list" placeholder="…or type an id: ${esc(ready.length ? ready[0].prefix + ":<model>" : "an installed Ollama model")}">` : ""}</div>
     <div class="cap" id="cmn">${esc(cur ? cur.note : "")}</div>
-    <div class="cap">${ready.length ? `Hosted APIs ready: ${ready.map(p => `<span class="mono">${esc(p.prefix)}:&lt;model&gt;</span>`).join(", ")}. ` : ""}${m.ollama_running ? "" : "Ollama is not running, so local models are not listed. "}${off.length ? `Not available (key not set): ${off.map(p => `${esc(p.prefix)} (${esc(p.key_env)})`).join(", ")}.` : ""}</div>
+    <div class="cap">${ready.length ? `Hosted APIs ready: ${ready.map(p => `<span class="mono">${esc(p.prefix)}:&lt;model&gt;</span>`).join(", ")}. ` : ""}${m.ollama_running ? "" : "Ollama is not running, so local models are not listed. "}${off.length ? `No key yet for ${off.map(p => esc(p.prefix)).join(", ")}: <a href="#/keys">add your own API key</a>.` : ""}</div>
     <label class="cap" for="cf" style="display:block;margin-top:12px">Agent framework</label>
     <div><select class="inp" id="cf">${m.frameworks.map(x => `<option ${x === CU.framework ? "selected" : ""}>${x}</option>`).join("")}</select></div>
     <label class="cap" style="display:block;margin-top:12px">Execution mode</label>
@@ -749,7 +757,7 @@ function cuSummary() {
       <div class="tile"><div class="k">Steps · tokens</div><div class="v" style="font-size:15px">${r.n_steps} · ${r.tokens.toLocaleString()}</div></div>
       <div class="tile"><div class="k">Time in steps</div><div class="v" style="font-size:15px">${r.duration_ms >= 1000 ? (r.duration_ms / 1000).toFixed(1) + " s" : r.duration_ms + " ms"}</div></div></div>
     <div class="cap">${esc(judged)}. Framework: ${esc(r.framework)}. Recorded ${esc(fmtTime(r.created_at))}.</div>
-    <div class="cap">Lookups: ${r.search === "live" ? "live (" + ([["wikidata", "Wikidata"], ["wikipedia+model", "Wikipedia + model"], ["model", "model knowledge"]].filter(x => r.lookups.some(l => l.source === x[0])).map(x => x[1]).join(", ") || "none answered") + ")" : "local fact table"}.</div>
+    <div class="cap">Lookups: ${r.search === "live" ? "live (" + ([["worldbank", "World Bank"], ["wikidata", "Wikidata"], ["wikipedia+model", "Wikipedia + model"], ["model", "model knowledge"]].filter(x => r.lookups.some(l => l.source === x[0])).map(x => x[1]).join(", ") || "none answered") + ")" : "local fact table"}.</div>
     ${f ? `<div class="cap">Fault: ${f.applied ? `${chip(f.type, "sus")} applied at step ${f.step_no}` : `${chip(f.type)} requested${f.requested_step ? ` at step ${f.requested_step}` : ""}, <b>not applied</b>`}.${r.reference_run_id ? ` Fault-free reference: <a href="#/run/${esc(r.reference_run_id)}" style="color:var(--accent)">${esc(r.reference_run_id)}</a>.` : ""}</div>` : ""}
     <div class="cap">Diagnosis status: <b style="color:var(--text2)">${esc(cuDiagStatus())}</b></div>
     ${r.notes.map(n => `<div class="note warn">${esc(n)}</div>`).join("")}
@@ -772,7 +780,7 @@ function cuTraceBody() {
   const t = CU.trace; if (t.error) { el.innerHTML = `<div class="note bad">${esc(t.error)}</div>`; return; }
   const ms = Object.fromEntries((t.timing || []).map(x => [x.step_no, x])), sus = CU.diag ? CU.diag.suspects.map(s => s.step_no) : [];
   const look = (t.custom || {}).lookups || {};
-  const src = s => { const l = s.actor === "search_agent" && !s.error && look[s.input]; return l ? chip(l.source === "model" ? "source: model knowledge" : l.source === "wikidata" ? "source: Wikidata, " + short(l.title || "", 40) + (l.as_of ? ", as of " + l.as_of : "") : "source: Wikipedia (" + short(l.title || "", 40) + ") + model") : ""; };
+  const src = s => { const l = s.actor === "search_agent" && !s.error && look[s.input]; return l ? chip(l.source === "model" ? "source: model knowledge" : l.source === "wikidata" || l.source === "worldbank" ? "source: " + (l.source === "wikidata" ? "Wikidata, " : "World Bank, ") + short(l.title || "", 40) + (l.as_of ? ", as of " + l.as_of : "") : "source: Wikipedia (" + short(l.title || "", 40) + ") + model") : ""; };
   el.innerHTML = `<div class="cap" style="margin-top:10px">${t.steps.length} recorded steps. Open in replay for full inputs, editing and comparison.</div>` + t.steps.map(s => {
     const x = ms[s.step_no];
     return `<div class="step ${sus[0] === s.step_no ? "sus" : sus.includes(s.step_no) ? "sus2" : ""}" style="cursor:default"><div class="hd"><b>#${s.step_no} · ${esc(s.actor)}</b>
@@ -852,13 +860,116 @@ function cuHistory() {
   $$("#c-hist .susrow").forEach(x => x.onclick = () => cuOpen(x.dataset.id));
 }
 
+/* ------------------------------------------------------------ API keys (bring your own key) */
+// Keys live only in this browser (localStorage, or sessionStorage when "remember" is off) and go to
+// this app's server in the X-Blackbox-Keys header of each request, which uses them for that request only.
+const KEY_STORE = "blackbox.apikeys.v1";
+const PROVIDERS = [
+  { p: "gemini", name: "Google Gemini", hint: "AIza…", url: "https://aistudio.google.com/apikey", def: "gemini-2.5-flash" },
+  { p: "groq", name: "Groq", hint: "gsk_…", url: "https://console.groq.com/keys", def: "llama-3.3-70b-versatile" },
+  { p: "openai", name: "OpenAI", hint: "sk-…", url: "https://platform.openai.com/api-keys", def: "gpt-4o-mini" },
+  { p: "openrouter", name: "OpenRouter", hint: "sk-or-…", url: "https://openrouter.ai/keys", def: "meta-llama/llama-3.3-70b-instruct" },
+  { p: "api", name: "Any OpenAI-compatible API", hint: "API key", base: true, def: "" },
+];
+function keysLoad() {
+  for (const st of ["localStorage", "sessionStorage"]) {
+    try { const v = JSON.parse(window[st].getItem(KEY_STORE) || "null"); if (v && v.p) return { ...v, remember: st === "localStorage" }; } catch (e) {}
+  }
+  return { remember: true, p: {} };
+}
+const KEYS = keysLoad();
+function keysSave() {
+  const v = JSON.stringify({ p: KEYS.p });
+  for (const [st, on] of [["localStorage", KEYS.remember], ["sessionStorage", !KEYS.remember]]) {
+    try { if (on) window[st].setItem(KEY_STORE, v); else window[st].removeItem(KEY_STORE); } catch (e) {}
+  }
+}
+function keysHeader() {
+  const out = {};
+  for (const [p, v] of Object.entries(KEYS.p)) {
+    if (!v || !v.key) continue;
+    out[p] = v.key;
+    if (p === "api" && v.base) out.api_base = v.base;
+  }
+  return Object.keys(out).length ? JSON.stringify(out) : null;
+}
+const keyCount = () => Object.values(KEYS.p).filter(v => v && v.key).length;
+// one model per provider with a key (its default): shown in every model dropdown
+function userModels() {
+  return PROVIDERS.filter(x => KEYS.p[x.p] && KEYS.p[x.p].key).map(x => {
+    const v = KEYS.p[x.p], m = v.model || (v.models && v.models.includes(x.def) ? x.def : (v.models || [])[0]) || x.def;
+    return m ? `${x.p}:${m}` : null;
+  }).filter(Boolean);
+}
+// every model the keys can use: suggestions for the "type a model id" boxes
+function fillModelList() {
+  let dl = $("#dl-models");
+  if (!dl) { dl = document.createElement("datalist"); dl.id = "dl-models"; document.body.appendChild(dl); }
+  const all = ["mock-large", "mock-small", ...userModels()];
+  for (const x of PROVIDERS) { const v = KEYS.p[x.p]; if (v && v.key) for (const m of v.models || []) all.push(`${x.p}:${m}`); }
+  dl.innerHTML = [...new Set(all)].map(m => `<option value="${esc(m)}">`).join("");
+  const b = $("#keyBadge"); if (b) { const n = keyCount(); b.textContent = n || ""; b.style.display = n ? "" : "none"; }
+}
+function withUserModels(list) { return [...new Set([...(list || []), ...userModels()])]; }
+
+function renderKeys() {
+  const main = $("#main");
+  const server = Object.fromEntries(((S.meta && S.meta.key_providers) || []).map(k => [k.prefix, k.server_key]));
+  main.innerHTML = `<div class="top"><h1>API keys</h1><span class="cap">${keyCount()} saved</span></div>
+  <div class="page"><div style="max-width:760px">
+    <div class="card"><h3>Use your own models</h3>
+      <div class="cap">Add a key for any provider below to run the agent, replays, branches and explanations with that provider's models.
+      Your key is stored <b>only in this browser</b> and is sent with your own requests to this app's server, which uses it for that request and never saves it.
+      Recorded runs keep the model name, not the key.</div>
+      <label class="row" style="margin:10px 0 0;gap:6px;cursor:pointer"><input type="checkbox" id="kremember" ${KEYS.remember ? "checked" : ""}>
+        <span>Remember my keys in this browser</span><span class="cap" style="margin:0">(untick to forget them when this tab closes)</span></label>
+    </div>
+    ${PROVIDERS.map(x => { const v = KEYS.p[x.p] || {};
+      const status = v.key ? (v.ok === false ? chip("key rejected", "err") : v.ok ? chip("working", "reused") : chip("saved, not tested")) : server[x.p] ? chip("server key in use") : chip("not set");
+      return `<div class="card" data-p="${x.p}"><h3>${esc(x.name)} <span class="mono" style="font-size:11.5px">${x.p}:&lt;model&gt;</span><span class="sp"></span>${status}</h3>
+        ${x.base ? `<label class="cap">Base URL (https)</label><input class="inp" data-f="base" style="width:100%" placeholder="https://api.example.com/v1" value="${esc(v.base || "")}">` : ""}
+        <div class="row"><input class="inp" data-f="key" type="password" autocomplete="off" spellcheck="false" style="flex:1;min-width:220px" placeholder="${esc(x.hint)}" value="${esc(v.key || "")}">
+          <button class="btn sm" data-a="show">Show</button><button class="primary" data-a="test" style="padding:6px 12px">Save &amp; test</button>
+          ${v.key ? `<button class="btn sm" data-a="del">Remove</button>` : ""}</div>
+        ${x.url ? `<div class="cap">No key yet? <a href="${x.url}" target="_blank" rel="noopener">Get one from ${esc(x.name)}</a>.</div>` : ""}
+        <div data-f="msg"></div>
+        ${v.key && (v.models || []).length ? `<label class="cap">Default model (appears in every model picker)</label>
+          <select class="inp" data-f="model" style="width:100%">${v.models.map(m => `<option ${m === (v.model || x.def) ? "selected" : ""}>${esc(m)}</option>`).join("")}</select>
+          <div class="cap">${v.models.length} models available with this key. Any of them can also be typed into a model box as <span class="mono">${x.p}:&lt;model&gt;</span>.</div>` : ""}
+      </div>`; }).join("")}
+  </div></div>`;
+  $("#kremember").onchange = e => { KEYS.remember = e.target.checked; keysSave(); };
+  $$("#main [data-p]").forEach(card => {
+    const p = card.dataset.p, x = PROVIDERS.find(y => y.p === p), f = n => card.querySelector(`[data-f="${n}"]`);
+    card.querySelector('[data-a="show"]').onclick = e => { const i = f("key"); i.type = i.type === "password" ? "text" : "password"; e.target.textContent = i.type === "password" ? "Show" : "Hide"; };
+    const del = card.querySelector('[data-a="del"]');
+    if (del) del.onclick = async () => { delete KEYS.p[p]; keysSave(); fillModelList(); await loadMeta().catch(() => {}); renderKeys(); };
+    if (f("model")) f("model").onchange = e => { KEYS.p[p].model = e.target.value; keysSave(); fillModelList(); loadMeta().catch(() => {}); };
+    card.querySelector('[data-a="test"]').onclick = async e => {
+      const key = f("key").value.trim(), base = x.base ? f("base").value.trim() : null, b = e.target;
+      if (!key) { f("msg").innerHTML = `<div class="note bad">Paste a key first.</div>`; return; }
+      b.disabled = true; b.innerHTML = '<span class="spin"></span>Testing…';
+      let r; try { r = await api("/api/keys/check", { provider: p, key, base_url: base }); } catch (err) { r = { ok: false, error: err.message, models: [] }; }
+      const prev = KEYS.p[p] || {};
+      KEYS.p[p] = { key, base: base || undefined, ok: r.ok, models: r.models && r.models.length ? r.models : (prev.key === key ? prev.models : []) || [],
+                    model: prev.model };
+      if (!r.ok && !r.models.length && prev.key !== key) KEYS.p[p].models = [];
+      keysSave(); fillModelList(); await loadMeta().catch(() => {});
+      renderKeys();
+      const msg = $(`#main [data-p="${p}"] [data-f="msg"]`);
+      if (msg) msg.innerHTML = r.ok ? `<div class="note ok">Key works${r.models.length ? ` · ${r.models.length} models found` : ""}. ${r.error ? esc(r.error) : "Saved in this browser."}</div>`
+                                    : `<div class="note bad">${esc(r.error || "The key did not work.")} It is saved anyway; fix it or remove it.</div>`;
+    };
+  });
+}
+
 /* ------------------------------------------------------------ record modal */
 function openRecord() {
   const m = S.meta;
   $("#modalBox").innerHTML = `<h3 style="margin:0 0 4px">Record a new run</h3><div class="cap">Runs the agent on a task and records every step. mock-* models run offline.</div>
     <label>Task</label><select class="inp" id="rt">${m.tasks.map(t => `<option value="${t.task_id}">${t.task_id}${t.demo ? " ★" : ""} · ${esc(t.text)}</option>`).join("")}</select>
     <label>Model</label><div class="row" style="margin:0"><select class="inp" id="rm" style="flex:1">${m.models.map(x => `<option>${x}</option>`).join("")}</select>
-      <input class="inp" id="rmc" style="flex:1.4" placeholder="…or groq:<model>, openai:<model>, ollama:<model>"></div>
+      <input class="inp" id="rmc" list="dl-models" style="flex:1.4" placeholder="…or type any id, e.g. gemini:<model>"></div>
     <label>Framework</label><select class="inp" id="rf">${m.frameworks.map(x => `<option>${x}</option>`).join("")}</select>
     <label>Inject fault</label><div class="row" style="margin:0"><select class="inp" id="rft" style="flex:1"><option>none</option>${m.fault_types.map(x => `<option>${x}</option>`).join("")}</select>
       <input class="inp" id="rfs" type="number" min="0" max="40" value="0" style="width:90px" title="Fault at step (0 = first compatible step)"></div>
@@ -880,21 +991,24 @@ $("#modal").onclick = e => { if (e.target.id === "modal") $("#modal").classList.
 async function loadData() { [S.runs, S.replays] = await Promise.all([api("/api/runs"), api("/api/replays")]); if (!location.hash.replace(/^#\/?/, "")) { renderSide(); renderThreads(); renderOverview(); } }
 async function loadMeta() {
   S.meta = await api("/api/meta");
+  S.meta.models = withUserModels(S.meta.models);
   const s = S.meta.services, line = (ok, name, url, off) => `<div><span class="dot ${ok ? "up" : "down"}"></span><b>${name}</b><br>${ok ? esc(url.replace(/^https?:\/\//, "")) : off}</div>`;
   $("#svc").innerHTML = line(s.diagnose, "Diagnose API", S.meta.diagnose_url, "offline, using built-in mock") + line(s.replay, "Replay API", S.meta.replay_url, "offline, replaying in-process");
 }
 function route() {
   const h = location.hash.replace(/^#\/?/, ""); hideTip();
-  $$(".nav").forEach(n => n.classList.toggle("on", n.dataset.go === (h === "results" ? "#/results" : h === "custom" ? "#/custom" : "#/")));
+  $$(".nav").forEach(n => n.classList.toggle("on", n.dataset.go === (h === "results" ? "#/results" : h === "custom" ? "#/custom" : h === "keys" ? "#/keys" : "#/")));
   $("#side").style.display = h ? "none" : "";
   if (h.startsWith("run/")) openRun(decodeURIComponent(h.slice(4)));
   else if (h === "results") renderResults();
   else if (h === "custom") renderCustom();
+  else if (h === "keys") renderKeys();
   else { D = null; renderActivity(); }
 }
 $$(".nav").forEach(n => n.onclick = () => location.hash = n.dataset.go);
 addEventListener("hashchange", route);
 (async () => {
+  fillModelList();
   try { await loadMeta(); await loadData(); route(); setInterval(() => loadMeta().catch(() => {}), 20000); }
   catch (e) { $("#main").innerHTML = `<div class="empty">Could not load the dashboard data: ${esc(e.message)}</div>`; }
 })();

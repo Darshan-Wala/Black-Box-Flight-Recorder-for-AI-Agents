@@ -4,6 +4,7 @@ heuristic - no model: blame the first step with an error, else the last step.
 llm_judge - an LLM reads the whole log and names the bad step. Ollama model name (llama3), or a
             hosted model as groq:<model>, openai:<model>, gemini:<model>, openrouter:<model>.
 """
+import contextvars
 import json
 import os
 import time
@@ -43,20 +44,29 @@ PROVIDERS = {
 
 
 
+# API keys sent with one /explain request ("api_keys": {"GEMINI_API_KEY": ...}); they override the
+# environment for that request only (set by diagnose_api.explain, never stored)
+API_KEYS: contextvars.ContextVar = contextvars.ContextVar("blackbox_api_keys", default={})
+
+
+def _env(name, default=""):
+    return API_KEYS.get().get(name) or os.environ.get(name, default)
+
+
 def _ask(llm, prompt, url):
     """Send one prompt, return the reply text. `groq:<model>` etc. go to that provider's
     OpenAI-style chat API; anything else goes to Ollama."""
     provider, _, name = llm.partition(":")
     if name and provider in PROVIDERS:
         base, key_env = PROVIDERS[provider]
-        base = base or os.environ.get("BLACKBOX_LLM_BASE_URL", "")
-        if not base or not os.environ.get(key_env):
+        base = base or _env("BLACKBOX_LLM_BASE_URL")
+        if not base or not _env(key_env):
             raise SystemExit(f"Set {key_env}" + ("" if base else " and BLACKBOX_LLM_BASE_URL") + f" to use {llm}")
         body = json.dumps({"model": name, "messages": [{"role": "user", "content": prompt}],
                            "response_format": {"type": "json_object"}}).encode()
         req = urllib.request.Request(base.rstrip("/") + "/chat/completions", body,
                                      {"Content-Type": "application/json",
-                                      "Authorization": "Bearer " + os.environ[key_env],
+                                      "Authorization": "Bearer " + _env(key_env),
                                       "User-Agent": "python-urllib"})
         for attempt in range(4):
             try:

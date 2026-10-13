@@ -1,14 +1,9 @@
-# Everything both parts need: pip install -r requirements.txt
-# Part 2 (diagnosis model)
-lightgbm
-numpy
-# Part 1 (recorder, replay, dashboard) and shared
+# Runtime dependencies: what Vercel installs, and enough to run the app with
+#   uvicorn server:app --port 3000
+# Training, tests, the Streamlit UI and the 3-process launcher need more: requirements-dev.txt
 fastapi>=0.110
-uvicorn>=0.29
-requests>=2.31
 pydantic>=2.5
+numpy>=1.26
+requests>=2.31
 jsonschema>=4.20
-langgraph>=0.2
-streamlit>=1.35        # only for the old UI: python start.py --streamlit
-pytest>=8
-httpx>=0.27
+langgraph>=0.2          # second agent framework (framework = "langgraph")

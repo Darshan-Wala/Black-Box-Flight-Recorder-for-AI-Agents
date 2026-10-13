@@ -1,0 +1,32 @@
+# Not uploaded to Vercel. The app needs: server.py, requirements.txt, part2/ (code + model.txt
+# + results.md) and "blackbox_part 1/" (code, ui/, contract/, runs/).
+
+# local state: the deployment builds its own run store in /tmp from blackbox_part 1/runs/
+blackbox_part 1/data/
+blackbox_part 1/replays/
+blackbox_part 1/confirmed/
+part2/data/
+
+# not needed at runtime
+part2/model_baseline.txt
+blackbox_part 1/tests/
+blackbox_part 1/.pytest_cache/
+Claude outputs/
+PROMPT_PART_B.md
+online evaluation.txt
+_snapshot.tgz
+
+# environments, caches, secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.vscode/
+.idea/
+
+# runs removed from the deploy seed
+_removed_runs/
